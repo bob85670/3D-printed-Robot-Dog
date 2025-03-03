@@ -81,6 +81,7 @@ void Kinematics::count_c(int leg_index, datatypes::Vector2D dir, float period) {
     }
 }
 
+//****************** Walking Gait Algorithms ******************
 datatypes::Vector Kinematics::trot_gait_func(datatypes::Vector2D c0, datatypes::Vector2D dir, bool invert) {
     // Calculate step dimensions
     float width = step_extent.x * mm / 2 * dir.x;
@@ -101,6 +102,7 @@ datatypes::Vector Kinematics::trot_gait_func(datatypes::Vector2D c0, datatypes::
         step_height / mm * int(invert)
     };
 }
+//****************** Walking Gait Algorithms ******************
 
 float Kinematics::c_base(float angle) {
     return sin(radians(angle / 2)) * BONE_LENGTH * 2;

@@ -243,6 +243,7 @@ void setup() {
   Console.println("Initialization complete");
 }
 
+//****************** Self-balancing ******************
 void update_balance() {
   sensors_event_t accel, gyro, temp;
   mpu.getEvent(&accel, &gyro, &temp);
@@ -288,6 +289,7 @@ void update_balance() {
   Serial.printf("Roll: %.2f, Pitch: %.2f, Outputs: %.2f, %.2f\n",
     complementary_roll, complementary_pitch, roll_output, pitch_output);
 }
+//****************** Self-balancing ******************
 
 void handle_test_mode() {
   static bool test_mode_active = false;
