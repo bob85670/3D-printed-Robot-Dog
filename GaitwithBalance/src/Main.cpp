@@ -1,19 +1,8 @@
 /*
-  Quadruped robot arduino sketch.
-  This code is modification of https://github.com/maestrakos/quad by Alexandros Petkos
-  Comment Description:
-
-  /// comment
-
-  //> used to explain the function of a line
-  //: used to summurize the function of multiple lines
-
-  === used for headers
-  ::: used for sketch parts
-
-  // ## used to explain the measurement unit of a variable
-  // !! used for warnings
+  Quadruped robot arduino sketch with self-balancing capability.
+  Based on https://github.com/maestrakos/quad by Alexandros Petkos
 */
+
 #include <Arduino.h>
 #include "Config.hpp"
 #include "Buzzer.hpp"
@@ -21,442 +10,323 @@
 #include "Kinematics.hpp"
 #include <Adafruit_MPU6050.h>
 
-/*
-  ==============================
-  HARDWARE - control method
-  ==============================
-*/
+// Controller includes based on configuration
 #ifdef __PS4_GAMEPAD__
 #include <PS4Controller.h>
 #endif
-//
+
 #ifdef __PS2_GAMEPAD__
-#include "PS2X_lib.h" //reference: http://www.billporter.info/
-const int RUMBLE = true;
-const int PRESSURES = false;
-// gamepad variables
-int gamepad_error;
-byte gamepad_type;
-byte gamepad_vibrate;
+#include "PS2X_lib.h"
 PS2X ps2x;
-#endif //__PS2_GAMEPAD__
-//
+const bool RUMBLE = true;
+const bool PRESSURES = false;
+int gamepad_error = 0;
+byte gamepad_type = 0;
+byte gamepad_vibrate = 0;
+#endif
+
 #ifdef __GOBLE__
 #include "GoBLE.hpp"
-#endif //__GOBLE__
+#endif
 
-//
+// Core components
 Buzzer buzzer(BUZZER_PIN);
 Hardware hardware(PCA9685_I2C_ADDR);
 Kinematics kinematics(hardware);
-float vo = kinematics.vrt_offset, ho = kinematics.hrz_offset;
 
-//: those local variables control the step direction and period
-datatypes::Vector2D _direction = {0, 0};
-float turn = 0;   //> indicates the direction of rotation
-float height = 0; //> indicates the leg extension
+// Movement control variables
+datatypes::Vector2D movement_direction = {0, 0};
+float turn = 0;   // Rotation direction
+float height = 0; // Leg extension
+int state = 3;    // Gait type: 0=idle, 1=trot, 2=yaw, 3=pitch-roll, 4=object-detection
+float step_period = 10.0; // Steps per second
 
-// int state = 0;  //if no self-balancing
-int state = 3;        //> indicates the type of gait, (0) idle, (1) trot, (2) yaw, (3) pitch-roll, (4) object-detection
-float _period = 10.0; //> indicates the number of steps every second
+// Stored offsets
+float vertical_offset = kinematics.vrt_offset;
+float horizontal_offset = kinematics.hrz_offset;
 
-datatypes::Rotator _sRotation; //> this variable stores the relative rotation of the body
-
+// Joystick inputs
 int8_t joystickLX = 0;
 int8_t joystickLY = 0;
 int8_t joystickRX = 0;
 int8_t joystickRY = 0;
 
-unsigned long duration;
-//
-//int sample_sum, sample_num = 10,
-//                sample_index;
-//float freq;
+// Input processing parameters
+const float STICK_DEADZONE = 6.0f;
+float lx = 0, ly = 0, rx = 0, ry = 0;
 
-//: handle input paramters
-float stick_min = 6.f;
-float lx, ly, rx, ry;
-
-//****************** Self-balancing ******************
-
-// Create an Adafruit_MPU6050 object
+// Self-balancing variables
 Adafruit_MPU6050 mpu;
-
-// Complementary filter variables
-float alpha = 0.9;
-float comp_pitch = 0;
-float comp_roll = 0;
+const float COMPLEMENTARY_FILTER_ALPHA = 0.9;
+float complementary_pitch = 0;
+float complementary_roll = 0;
 unsigned long prev_time = 0;
 
-// Add these variables to store the previous error, integral, and derivative terms for pitch and roll
+// PID control variables
 float pitch_error_sum = 0, roll_error_sum = 0;
 float pitch_prev_error = 0, roll_prev_error = 0;
+const float Kp_pitch = 0;
+const float Ki_pitch = 0.3;
+const float Kd_pitch = 0;
+const float Kp_roll = 0;
+const float Ki_roll = 0.3;
+const float Kd_roll = 0;
+const float INTEGRAL_LIMIT = 20;
 
-// Define the gains for the proportional (Kp), integral (Ki), and derivative (Kd) terms
-float Kp_pitch = 0;
-float Ki_pitch = 0.3;
-float Kd_pitch = 0;
-float Kp_roll = 0;
-float Ki_roll = 0.3;
-float Kd_roll = 0;
-
-float integral_limit = 20; // Adjust this value depending on your system
-// Add a variable to store the time of the last update
 unsigned long last_update = 0;
-
-//****************** Self-balancing ******************
-
-
+unsigned long duration = 0;
 
 #ifdef __PS2_GAMEPAD__
-void init_input_ps2()
-{
-  for (int i = 0; i < 3; i++)
-  {
+void init_ps2_controller() {
+  for (int attempt = 0; attempt < 3; attempt++) {
     gamepad_error = ps2x.config_gamepad(PS2_CLK, PS2_CMD, PS2_ATT, PS2_DAT, true, true);
-    if (gamepad_error == 0)
-    {
-      Console.println("Found Controller, configured successful;\n");
+    if (gamepad_error == 0) {
+      Console.println("PS2 Controller configured successfully");
       break;
     }
     delay(1000);
   }
-  if (gamepad_error == 1)
-  {
-    Console.print("No PS2 controller found: ");
-    Console.println(gamepad_error);
+
+  if (gamepad_error == 1) {
+    Console.println("No PS2 controller found");
     aborted();
-  }
-  else if (gamepad_error == 2)
-  {
-    Console.print("PS2 Controller found but not accepting commands: ");
-    Console.println(gamepad_error);
+  } else if (gamepad_error == 2) {
+    Console.println("PS2 Controller found but not accepting commands");
     aborted();
   }
 
-  //verify the gamepad type
   gamepad_type = ps2x.readType();
-  if (gamepad_type == 0)
-    Console.println("Unknown PS2 Controller type found");
-  else if (gamepad_type == 1)
-    Console.println("DualShock Controller found");
-  else if (gamepad_type == 2)
-    Console.println("GuitarHero Controller found");
-  else if (gamepad_type == 3)
-    Console.println("Wireless Sony DualShock Controller found");
-
-  //turn off gamepad vibration
+  const char* controller_types[] = {
+    "Unknown Controller",
+    "DualShock Controller",
+    "GuitarHero Controller",
+    "Wireless Sony DualShock Controller"
+  };
+  Console.println(controller_types[min(gamepad_type, 3)]);
+  
   gamepad_vibrate = 0;
 }
-#endif //__PS2_GAMEPAD__
+#endif
 
-inline void init_input() {
+void init_controller() {
 #ifdef __PS2_GAMEPAD__
-  init_input_ps2();
-  Console.println("Using PS2 Controller!");
+  init_ps2_controller();
+  Console.println("Using PS2 Controller");
 #elif defined(__GOBLE__)
   Goble.begin(GOBLE_BAUD_RATE);
-  Console.println("Using BlueTooth!");
+  Console.println("Using BlueTooth");
 #elif defined(__PS4_GAMEPAD__)
   PS4.begin((char*)PS4_MAC_ADDR);
-  Console.println("Using PS4 Controller!");
+  Console.println("Using PS4 Controller");
 #else
-  Console.println("No Controller!");
+  Console.println("No Controller configured");
 #endif
 }
 
-void aborted()
-{
+void aborted() {
   Console.println("Program aborted!");
   buzzer.beepError();
-  while (1)
-    ;
+  while (1) ; // Infinite loop
 }
 
+void process_input() {
+  // Interpolate joystick values for smooth movement
+  lx = Kinematics::inter(lx, joystickLX / 4.0f, 0.5f);
+  ly = Kinematics::inter(ly, joystickLY / 4.0f, 0.5f);
+  rx = Kinematics::inter(rx, joystickRX / 4.0f, 0.5f);
+  ry = Kinematics::inter(ry, joystickRY / 4.0f, 0.5f);
 
-void handle_input()
-{
-  lx = Kinematics::inter(lx, joystickLX / 4.f, 0.5f); //> gets the interpolated x-position of the left  analog stick
-  ly = Kinematics::inter(ly, joystickLY / 4.f, 0.5f); //> gets the interpolated y-position of the left  analog stick
-  rx = Kinematics::inter(rx, joystickRX / 4.f, 0.5f); //> gets the interpolated x-position of the right analog stick
-  ry = Kinematics::inter(ry, joystickRY / 4.f, 0.5f); //> gets the interpolated y-position of the right analog stick
-  //Console.println("joystickLY: " + String(joystickLY) + ", ly: " + String(ly));
-  //Console.println("joystickRX: " + String(joystickRX) + ", rx: " + String(rx));
-  //Console.println("joystickRY: " + String(joystickRY) + ", ry: " + String(ry));
-  if (abs(lx) > stick_min)
-  { //> checks whether the stick position is out of the deadzone
-    float x0 = lx - stick_min * Kinematics::sign(lx); //> subtracts the deadzone
-    if (state == 1)
-    {
-      _direction.y = 0; //x0 / 10.f;
-    }
-    else if (state != 4)
-    {
-      _direction.y = x0 / 2;
-    }
+  // Process X-axis movement
+  if (abs(lx) > STICK_DEADZONE) {
+    float x_movement = lx - STICK_DEADZONE * Kinematics::sign(lx);
+    movement_direction.y = (state == 1) ? 0 : x_movement / 2;
+  } else {
+    movement_direction.y = 0;
   }
-  else
-    _direction.y = 0;
 
-  if (abs(ly) > stick_min)
-  { //> checks whether the stick position is out of the deadzone
-    float y0 = ly - stick_min * Kinematics::sign(ly); //> subtracts the deadzone
-    if (state == 1)
-    {
-      _direction.x = y0 / 10.f;
-      if (y0 > 0)
-        kinematics.vrt_offset = Kinematics::inter(kinematics.vrt_offset, vo - 6.f, 2.f);
-      else
-        kinematics.vrt_offset = Kinematics::inter(kinematics.vrt_offset, vo + 3.f, 2.f);
+  // Process Y-axis movement
+  if (abs(ly) > STICK_DEADZONE) {
+    float y_movement = ly - STICK_DEADZONE * Kinematics::sign(ly);
+    if (state == 1) {
+      movement_direction.x = y_movement / 10.0f;
+      kinematics.vrt_offset = Kinematics::inter(
+        kinematics.vrt_offset,
+        vertical_offset + (y_movement > 0 ? -6.0f : 3.0f),
+        2.0f
+      );
+    } else if (state != 4) {
+      movement_direction.x = y_movement / 2;
+      kinematics.vrt_offset = vertical_offset;
     }
-    else if (state != 4)
-    {
-      _direction.x = y0 / 2;
-      kinematics.vrt_offset = vo;
-    }
+  } else {
+    movement_direction.x = 0;
+    kinematics.vrt_offset = vertical_offset;
   }
-  else
-  {
-    _direction.x = 0;
-    kinematics.vrt_offset = vo;
-  };
 
-  if (abs(rx) > stick_min)
-  { //> checks whether the stick position is out of the deadzone
-    float x1 = rx - stick_min * Kinematics::sign(rx); //> subtracts the deadzone
-    if (state == 1)
-      turn = x1 / 16.f;
-    else if (state != 4)
-      turn = x1;
-  }
-  else
+  // Process rotation
+  if (abs(rx) > STICK_DEADZONE) {
+    float rotation = rx - STICK_DEADZONE * Kinematics::sign(rx);
+    turn = (state == 1) ? rotation / 16.0f : (state != 4 ? rotation : 0);
+  } else {
     turn = 0;
-
-  if (abs(ry) > stick_min)
-  { //> checks whether the stick position is out of the deadzone
-    float y1 = ry - stick_min * Kinematics::sign(ry); //> subtracts the deadzone
-    height = y1;
   }
-  else
-    height = 0;
 
-  //if (PS4.data.button.touchpad)  //> checks the touchpad state
-  //#ifdef __PS2_GAMEPAD__
-  //  if (ps2x.ButtonPressed(PSB_CIRCLE))
-  //  {
-  //    if (_tb == true)
-  //    {
-  //      _tb = false;
-  //      state++;
-  //      if (state > 4)
-  //        state = 0;
-  //      buzzer.beepShort();
-  //      //Console.println("state: " + String(state));
-  //    }
-  //  }
-  //  else
-  //    _tb = true;
-  //#endif
+  // Process height adjustment
+  if (abs(ry) > STICK_DEADZONE) {
+    height = ry - STICK_DEADZONE * Kinematics::sign(ry);
+  } else {
+    height = 0;
+  }
 }
 
 #ifdef __DEBUG__
-#define properties 0
-void commands_exe(float val1, float val2, float val3)
-{
-  //: propertios 0 is used to calibrate the joints
-  if (properties == 0)
-  {
+void process_serial_command(float val1, float val2, float val3) {
+  const int CALIBRATION_MODE = 0;
+  const int BALANCE_MODE = 1;
+  
+  if (CALIBRATION_MODE == 0) {
     int leg = val1;
     int joint = val2;
     int servo = val3;
-    Console.print("- leg ");
-    Console.print(leg);
-    Console.print(" joint ");
-    Console.print(joint);
-    Console.print(" set to ");
-    Console.print(servo);
-    Console.print(".\n");
-
+    Console.printf("Setting leg %d joint %d to %d\n", leg, joint, servo);
     hardware.set_servo(leg, joint, servo);
-  }
-  //: propertios 1 is used for small adjustments to balance the weight
-  else if (properties == 1)
-  {
+  } else if (BALANCE_MODE == 1) {
     int leg = val1;
     int empty = val2;
-    int ammount = val3;
-    Console.print("- leg ");
-    Console.print(leg);
-    Console.print(" null ");
-    Console.print(empty);
-    Console.print(" set to ");
-    Console.print(ammount);
-    Console.print(".\n");
-
-    kinematics.base_offset[leg] = ammount;
+    int amount = val3;
+    Console.printf("Adjusting leg %d balance by %d\n", leg, amount);
+    kinematics.base_offset[leg] = amount;
   }
 }
 
-// !! make sure you have enabled Newline or Carriage return
-#define _mode 1 // (0) used for calibration and testing, (1) uses serial as input
-void handle_serial()
-{
-  //: reads and stores the serial data
-  int i = 0;
-  float buff[3] = {0, 0, 0};
-  String s_buff = "";
-  while (Console.available())
-  {
+void handle_serial_input() {
+  const int CALIBRATION_MODE = 0;
+  float values[3] = {0, 0, 0};
+  int value_index = 0;
+  String buffer;
+
+  while (Console.available()) {
     char c = Console.read();
-    if (c == 13 || c == 32 || c == '\n')
-    {
-      buff[i] = s_buff.toFloat();
-      s_buff = "";
-      i++;
+    if (c == 13 || c == 32 || c == '\n') {
+      values[value_index++] = buffer.toFloat();
+      buffer = "";
+    } else {
+      buffer += c;
     }
-    else
-      s_buff += c;
   }
 
-  if (_mode == 0)
-    commands_exe(buff[0], buff[1], buff[2]);
-  else if (_mode == 1)
-    if (state == 4)
-    {
-      _direction = {buff[0], buff[1]};
-      turn = buff[2];
-    }
+  if (CALIBRATION_MODE == 0) {
+    process_serial_command(values[0], values[1], values[2]);
+  } else if (state == 4) {
+    movement_direction = {values[0], values[1]};
+    turn = values[2];
+  }
 }
-#endif //__DEBUG__
+#endif
 
-void setup()
-{
+void setup() {
 #ifdef __DEBUG__
   Console.begin(115200);
-  Console.println("in debugging mode");
+  Console.println("Debug mode enabled");
 #endif
+
   hardware.init_hardware();
-  init_input();
-  //: servo calibration mode - while PIN 25 connects to 3.3V, all servos in 90° for servo arm adjustment °
+  init_controller();
+
+  // Servo calibration mode
   pinMode(SERVO_CAL_PIN, INPUT_PULLDOWN);
   while (digitalRead(SERVO_CAL_PIN)) {
     delay(1000);
   }
-  //
+
   buzzer.beepShort();
-  Console.println("[started]");
+  Console.println("Initialization complete");
 }
 
-void loop()
-{ 
+void update_balance() {
+  sensors_event_t accel, gyro, temp;
+  mpu.getEvent(&accel, &gyro, &temp);
 
-  //****************** Self-balancing ******************
-  // Read accelerometer and gyroscope data
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
-  // Calculate accelerometer angles
-  float acc_pitch = atan2(a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / M_PI;
-  float acc_roll = atan2(a.acceleration.y, sqrt(a.acceleration.x * a.acceleration.x + a.acceleration.z * a.acceleration.z)) * 180.0 / M_PI;
-
-  // Calculate time since the last loop
-  unsigned long current_time = millis();
-  float dt = (current_time - prev_time) / 1000.0;
-  prev_time = current_time;
+  // Calculate angles from accelerometer data
+  float acc_pitch = atan2(accel.acceleration.x, 
+    sqrt(sq(accel.acceleration.y) + sq(accel.acceleration.z))) * RAD_TO_DEG;
+  float acc_roll = atan2(accel.acceleration.y,
+    sqrt(sq(accel.acceleration.x) + sq(accel.acceleration.z))) * RAD_TO_DEG;
 
   // Update complementary filter
-  comp_pitch = alpha * (comp_pitch + g.gyro.x * dt) + (1 - alpha) * acc_pitch;
-  comp_roll = alpha * (comp_roll + g.gyro.y * dt) + (1 - alpha) * acc_roll;
+  unsigned long current_time = millis();
+  float dt = (current_time - prev_time) / 1000.0f;
+  prev_time = current_time;
 
-  // Print the roll and pitch angles to the serial monitor
-  Serial.print("Roll: ");
-  Serial.print(comp_roll);
-  Serial.print(", Pitch: ");
-  Serial.print(comp_pitch);
+  complementary_pitch = COMPLEMENTARY_FILTER_ALPHA * (complementary_pitch + gyro.gyro.x * dt) +
+                       (1 - COMPLEMENTARY_FILTER_ALPHA) * acc_pitch;
+  complementary_roll = COMPLEMENTARY_FILTER_ALPHA * (complementary_roll + gyro.gyro.y * dt) +
+                      (1 - COMPLEMENTARY_FILTER_ALPHA) * acc_roll;
 
-  // Calculate errors
-  float pitch_error = 0 - comp_pitch;
-  float roll_error = 0 - comp_roll;
+  // Calculate PID terms
+  float pitch_error = -complementary_pitch;
+  float roll_error = -complementary_roll;
 
-  // Calculate integral term
-  pitch_error_sum += pitch_error * dt;
-  roll_error_sum += roll_error * dt;
+  pitch_error_sum = constrain(pitch_error_sum + pitch_error * dt, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
+  roll_error_sum = constrain(roll_error_sum + roll_error * dt, -INTEGRAL_LIMIT, INTEGRAL_LIMIT);
 
-  // Limit the integral term to prevent windup
-  pitch_error_sum = constrain(pitch_error_sum, -integral_limit, integral_limit);
-  roll_error_sum = constrain(roll_error_sum, -integral_limit, integral_limit);
-
-  // Calculate derivative term
   float pitch_derivative = (pitch_error - pitch_prev_error) / dt;
   float roll_derivative = (roll_error - roll_prev_error) / dt;
 
-  // Store current error as previous error for next iteration
   pitch_prev_error = pitch_error;
   roll_prev_error = roll_error;
 
-  // Calculate PID output
+  // Calculate final outputs
   float pitch_output = Kp_pitch * pitch_error + Ki_pitch * pitch_error_sum + Kd_pitch * pitch_derivative;
   float roll_output = Kp_roll * roll_error + Ki_roll * roll_error_sum + Kd_roll * roll_derivative;
-  float LXY=-pitch_output/19*128;
-  float LXT=-roll_output/22*128;
-  joystickLY = constrain(LXY, -128, 127);
-  joystickLX = constrain(LXT, -128, 127);
-  Serial.print(" roll_output: ");
-  Serial.print(roll_output);
-  Serial.print(",pitch_output: ");
-  Serial.println(pitch_output);
-  //****************** Self-balancing ******************
 
+  // Convert PID outputs to joystick values
+  joystickLY = constrain(int(-pitch_output/19*128), -128, 127);
+  joystickLX = constrain(int(-roll_output/22*128), -128, 127);
 
-  //hardware.testGPIOservos(); return;
-  //
-  duration = millis();
-  // this code gets the frequency of the loop function
-  /*sample_sum += 1000.0 / (millis() - duration);
-    sample_index++;
+  // Debug output
+  Serial.printf("Roll: %.2f, Pitch: %.2f, Outputs: %.2f, %.2f\n",
+    complementary_roll, complementary_pitch, roll_output, pitch_output);
+}
 
-    if (sample_index > sample_num) {
-    freq = sample_sum / sample_num;
-    Console.println(freq);
-    sample_sum = 0;
-    sample_index = 0;
-    }*/
-  hardware.handle_hardware();
-  kinematics.handle_kinematics(state, _direction, turn, height, _period);
-  //
-  //: test mode -  while PIN 25 connects to 3.3V again, will walk in trot gait
-  static bool testMode = false;
-  static long checkDuration = 0;
-  if ((duration - checkDuration) > 1000) {
-    checkDuration = duration;
+void handle_test_mode() {
+  static bool test_mode_active = false;
+  static long last_check = 0;
+
+  if ((duration - last_check) > 1000) {
+    last_check = duration;
     if (digitalRead(SERVO_CAL_PIN)) {
       hardware.attach();
       joystickLY = 127;
       joystickRX = 127;
       state = 1;
-      testMode = true;
-      goto __handle_input;
-    } else if (testMode) {
-      joystickLX = 0; joystickLY = 0;
-      joystickRX = 0; joystickRY = 0;
-      testMode = false;
-      goto __handle_input;
+      test_mode_active = true;
+      return;
+    } else if (test_mode_active) {
+      joystickLX = joystickLY = joystickRX = joystickRY = 0;
+      test_mode_active = false;
     }
   }
+}
 
+void handle_bluetooth() {
 #ifdef __GOBLE__
-  static long previousDuration = 0;
-  if ((duration - previousDuration) > 60000) {
-    previousDuration = duration;
-    hardware.detach(); // turn off servos while not moving for 1 min
-    joystickLX = 0; joystickLY = 0;
-    joystickRX = 0; joystickRY = 0;
+  static long last_activity = 0;
+  const long TIMEOUT = 60000; // 1 minute timeout
+
+  if ((duration - last_activity) > TIMEOUT) {
+    last_activity = duration;
+    hardware.detach();
+    joystickLX = joystickLY = joystickRX = joystickRY = 0;
     buzzer.beepShort();
-    Console.println("stopped servos for power saving!");
+    Console.println("Power saving mode activated");
     return;
   }
+
   if (Goble.available()) {
-    previousDuration = duration;
-    hardware.attach(); // turn on servos if they are off
+    last_activity = duration;
+    hardware.attach();
+    
     switch (state) {
       case 1:
         joystickLY = map(Goble.readJoystickY(), 255, 0, 127, -128);
@@ -472,10 +342,10 @@ void loop()
         joystickLX = map(Goble.readJoystickX(), 0, 255, 127, -128);
         break;
       default:
-        joystickLX = 0; joystickLY = 0;
-        joystickRX = 0; joystickRY = 0;
+        joystickLX = joystickLY = joystickRX = joystickRY = 0;
     }
 
+    // Handle button presses
     if (Goble.readSwitchUp() == PRESSED) {
       state = 0;
       buzzer.beepShort();
@@ -488,60 +358,58 @@ void loop()
     } else if (Goble.readSwitchRight() == PRESSED) {
       state = 1;
       buzzer.beepShort();
-    }
-
-    if (Goble.readSwitchMid() == PRESSED) {
-      buzzer.beepShort();
-    } else if (Goble.readSwitchSelect() == PRESSED) {
-      buzzer.beepShort();
-    } else if (Goble.readSwitchAction() == PRESSED) {
-      buzzer.beepShort();
     } else if (Goble.readSwitchStart() == PRESSED) {
-      buzzer.beepShort();
       hardware.detach();
-      joystickLX = 0; joystickLY = 0;
-      joystickRX = 0; joystickRY = 0;
-      previousDuration = duration;
+      joystickLX = joystickLY = joystickRX = joystickRY = 0;
+      last_activity = duration;
+      buzzer.beepShort();
     }
   }
-#else // __GOBLE__
-  static long previousDuration = 0;
-  if ((duration - previousDuration) > 30) {
-    previousDuration = duration;
+#endif
+}
+
+void handle_gamepad() {
 #if defined(__PS4_GAMEPAD__)
+  static long last_check = 0;
+  if ((duration - last_check) > 30) {
+    last_check = duration;
     if (PS4.isConnected()) {
       joystickLX = PS4.data.analog.stick.lx;
       joystickLY = PS4.data.analog.stick.ly;
       joystickRX = PS4.data.analog.stick.rx;
       joystickRY = PS4.data.analog.stick.ry;
-      if ( PS4.data.button.up ) {
+
+      if (PS4.data.button.up) {
         state = 0;
         buzzer.beepShort();
-      } else if ( PS4.data.button.down ) {
+      } else if (PS4.data.button.down) {
         state = 2;
         buzzer.beepShort();
-      } else if ( PS4.data.button.left ) {
+      } else if (PS4.data.button.left) {
         state = 3;
         buzzer.beepShort();
-      } else if ( PS4.data.button.right ) {
+      } else if (PS4.data.button.right) {
         state = 1;
         buzzer.beepShort();
-      } else  if ( PS4.data.button.triangle ) {
+      } else if (PS4.data.button.triangle) {
         hardware.detach();
         buzzer.beepShort();
-      } else if ( PS4.data.button.cross ) {
+      } else if (PS4.data.button.cross) {
         hardware.attach();
         buzzer.beepShort();
       }
     }
+  }
 #elif defined(__PS2_GAMEPAD__)
+  static long last_check = 0;
+  if ((duration - last_check) > 30) {
+    last_check = duration;
     ps2x.read_gamepad(false, gamepad_vibrate);
+    
     joystickLX = map(ps2x.Analog(PSS_LX), 0, 255, 127, -128);
     joystickLY = map(ps2x.Analog(PSS_LY), 0, 255, 127, -128);
     joystickRX = map(ps2x.Analog(PSS_RX), 255, 0, 127, -128);
     joystickRY = map(ps2x.Analog(PSS_RY), 255, 0, 127, -128);
-    //        Console.println("joystickLY: " + String(joystickLY) + ", joystickLX: " + String(joystickLX));
-    //        Console.println("joystickRY: " + String(joystickRY) + ", joystickRX: " + String(joystickRX));
 
     if (ps2x.ButtonPressed(PSB_PAD_DOWN)) {
       state = 2;
@@ -555,19 +423,37 @@ void loop()
     } else if (ps2x.ButtonPressed(PSB_PAD_RIGHT)) {
       state = 1;
       buzzer.beepShort();
-    } else  if (ps2x.ButtonPressed(PSB_CIRCLE)) {
+    } else if (ps2x.ButtonPressed(PSB_CIRCLE)) {
       state = 4;
       buzzer.beepShort();
     }
-#endif  // ps2/ps4_GAMEPAD__
   }
-#endif  //__GOBLE__
-  //
-__handle_input:
-  handle_input();
-  //
+#endif
+}
+
+void loop() {
+  duration = millis();
+
+  // Update balance control
+  update_balance();
+
+  // Update hardware and kinematics
+  hardware.handle_hardware();
+  kinematics.handle_kinematics(state, movement_direction, turn, height, step_period);
+
+  // Handle test mode
+  handle_test_mode();
+
+  // Handle controller input
+  handle_bluetooth();
+  handle_gamepad();
+
+  // Process inputs
+  process_input();
+
 #ifdef __DEBUG__
-  if (Console.available())
-    handle_serial();
+  if (Console.available()) {
+    handle_serial_input();
+  }
 #endif
 }

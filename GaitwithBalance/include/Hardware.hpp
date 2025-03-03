@@ -1,216 +1,70 @@
 #ifndef __HARDWARE__
 #define __HARDWARE__
+
 #include "Config.hpp"
-#include <Adafruit_PWMServoDriver.h> //https://github.com/adafruit/Adafruit-PWM-Servo-Driver-Library
+#include <Adafruit_PWMServoDriver.h>
 #include "datatypes.h"
 
-/*
-  #include <I2Cdev.h>
-  #include <MPU6050_6Axis_MotionApps20.h>
-*/
+/**
+ * @brief Hardware control class for quadruped robot
+ * Manages servo motors and sensor interfaces
+ */
 class Hardware : public Adafruit_PWMServoDriver {
+public:
+    // Constructors
+    explicit Hardware(int addr);
+    Hardware();
 
-  private:
-    /*
-      ==============================
-      HARDWARE - SERVO PARAMETERS
-      ==============================
-    */
-    const int s_output[4][3] = {
-      {4, 5, 6},    // ## {shoulder chnl, upper chnl, lower chnl} robot's right back
-      {0, 1, 2},    // ## {shoulder chnl, upper chnl, lower chnl} robot's right front
-      {15, 14, 13}, // ## {shoulder chnl, upper chnl, lower chnl} robot's left front
-      {11, 10, 9}   // ## {shoulder chnl, upper chnl, lower chnl} robot's left back
-    };
-
-    const int pulse_min = 105;
-    const int pulse_max = 500;
-
-    // ## pulse offset - offset value to adjust servo to center 90°
-   int s_offset_pulse[4][3] = {
-     {0, 0, 0}, // ## {shoulder chnl, upper chnl, lower chnl} robot's right back
-     {0, 0, 0}, // ## {shoulder chnl, upper chnl, lower chnl} robot's right front
-     {0, 0, 0}, // ## {shoulder chnl, upper chnl, lower chnl} robot's left front
-     {0, 0, 0}  // ## {shoulder chnl, upper chnl, lower chnl} robot's left back
-   };    
-//    
-//    int s_offset_pulse[4][3] = {
-//      { -10, -10, -15},
-//      {10, 10, 0},      
-//      {0, 10, 35}, 
-//      {0, 10, 30}
-//    };
-
-    // big red
-  //  int s_offset_pulse[4][3] = {
-  //     {10, 20, 30}, // ## {shoulder chnl, upper chnl, lower chnl} robot's right back
-  //     {0, 70, 0}, // ## {shoulder chnl, upper chnl, lower chnl} robot's right front
-  //     {0, -20, -20}, // ## {shoulder chnl, upper chnl, lower chnl} robot's left front
-  //     {-20, 0, -30}  // ## {shoulder chnl, upper chnl, lower chnl} robot's left back
-  //   };    
+    // Core functions
+    void init_hardware();
+    void handle_hardware();
     
-    const int s_optinv[4][3] = {
-      {0, 0, 0}, // ## {dir, dir, dir}
-      {1, 0, 0}, // ## {dir, dir, dir}
-      {0, 1, 1}, // ## {dir, dir, dir}
-      {1, 1, 1}  // ## {dir, dir, dir}
+    // Servo control
+    void attach();
+    void detach();
+    void set_leg(int leg, datatypes::Rotator rot);
+    void set_servo(int leg, int joint, float pulse);
+
+private:
+    // Servo configuration
+    static constexpr int SERVO_CHANNELS[4][3] = {
+        {4, 5, 6},     // Right back leg  (shoulder, upper, lower)
+        {0, 1, 2},     // Right front leg (shoulder, upper, lower)
+        {15, 14, 13},  // Left front leg  (shoulder, upper, lower)
+        {11, 10, 9}    // Left back leg   (shoulder, upper, lower)
     };
 
-    const int d_constraint_min[3] { -70, 20, 40}; // ## {deg, deg, deg}
-    const int d_constraint_max[3] {70, 110, 150}; // ## {deg, deg, deg}
+    // Servo pulse limits
+    static constexpr int PULSE_MIN = 105;
+    static constexpr int PULSE_MAX = 500;
 
+    // Servo center offsets (adjust for 90° position)
+    int servo_offset[4][3] = {
+        {0, 0, 0},  // Right back leg  (shoulder, upper, lower)
+        {0, 0, 0},  // Right front leg (shoulder, upper, lower)
+        {0, 0, 0},  // Left front leg  (shoulder, upper, lower)
+        {0, 0, 0}   // Left back leg   (shoulder, upper, lower)
+    };
 
-    //
-    boolean attached = false;
-  public:
-    Hardware(int addr): Adafruit_PWMServoDriver(addr) {}
-    Hardware(): Hardware(0x40) {}
+    // Servo direction multipliers (1 = normal, 0 = inverted)
+    const int servo_direction[4][3] = {
+        {0, 0, 0},  // Right back leg
+        {1, 0, 0},  // Right front leg
+        {0, 1, 1},  // Left front leg
+        {1, 1, 1}   // Left back leg
+    };
 
-    /*
-      ::: SETUP :::
-    */
-    void init_hardware()
-    {
-      Adafruit_PWMServoDriver::begin();
-      Adafruit_PWMServoDriver::setPWMFreq(50);
-      delay(10);
-      //init_mpu();
-      Wire.begin();
-      Wire.setClock(400000);
-      pinMode(OE_PIN, OUTPUT);
-      attach();
-    }
+    // Joint angle constraints (degrees)
+    const int ANGLE_MIN[3] = {-70, 20, 40};   // Minimum angles for shoulder, upper, lower
+    const int ANGLE_MAX[3] = {70, 110, 150};  // Maximum angles for shoulder, upper, lower
 
-    void attach() {
-      const int right_back_leg = 0;
-      const int right_front_leg = 1;
-      const int left_front_leg = 2;
-      const int left_back_leg = 3;      
-      int pulse = map(90, 0, 180, pulse_min, pulse_max);
-      int legs[] = {
-        right_back_leg,
-        left_back_leg,
-        right_front_leg,
-        left_front_leg
-      };
+    // State tracking
+    bool servos_attached = false;
 
-      if (attached) return;
-      digitalWrite(OE_PIN, LOW);
-      for (int joint = 0; joint < 3; joint++) {
-        for (int i = 0; i < 4; i++) {
-          int channel = s_output[legs[i]][joint];
-          int offset = s_offset_pulse[legs[i]][joint];
-          setPWM(channel, 0, pulse + offset);
-          delay(30);
-        }
-      }
-      attached = true;
-    }
-
-    void detach() {
-      if (!attached) return;
-      digitalWrite(OE_PIN, HIGH);
-      attached = false;
-    }
-
-    void set_leg(int leg, datatypes::Rotator rot)
-    {
-      set_joint(leg, 0, rot.yaw);
-      set_joint(leg, 1, rot.pitch);
-      set_joint(leg, 2, rot.roll);
-    }
-
-    void set_servo(int leg, int joint, float pulse)
-    {
-      int _num = s_output[leg][joint];
-      setPWM(_num, 0, pulse);
-    }
-
-  private:
-    void set_joint(int leg, int joint, float deg)
-    {
-      int _min = pulse_min;
-      int _max = pulse_max;
-      int _inv = s_optinv[leg][joint];
-      int _minC = d_constraint_min[joint];
-      int _maxC = d_constraint_max[joint];
-
-      if (deg < _minC)
-        deg = _minC;
-      else if (deg > _maxC)
-        deg = _maxC;
-      int _num = s_output[leg][joint];
-      if (_inv == 0)
-        setPWM(_num, 0, map(deg, _minC, _maxC, _min, _max) + s_offset_pulse[leg][joint]);
-      else if (_inv == 1)
-        setPWM(_num, 0, map(deg , _minC, _maxC, _max, _min) + s_offset_pulse[leg][joint]);
-    }
-    /*
-      == == == == == == == == == == == == == == ==
-      HARDWARE - MPU VARIABLES
-      == == == == == == == == == == == == == == ==
-      /
-
-      //uint16_t packetSize;    // expected DMP packet size (default 42 bytes)
-      //uint8_t fifoBuffer[64]; // FIFO storage buffer
-
-      //Quaternion q;           // [w, x, y, z]         quaternion container
-      //float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
-      //VectorFloat gravity;    // [x, y, z]            gravity vector
-
-      MPU6050 mpu;
-   
-      ::: [Gyroscope/Accelerometer Sensor] FUNCTIONS :::
-    */
-
-    void update_mpu_data()
-    {
-      /*if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
-        mpu.dmpGetQuaternion(&q, fifoBuffer);
-        mpu.dmpGetGravity(&gravity, &q);
-        mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-        _sRotation = {ypr[0] * 80 / M_PI,
-                      -ypr[1] * 80 / M_PI,
-                      ypr[2] * 80 / M_PI
-                     };
-
-       if (DEBUG == 0) {
-          Console.print(ypr[0] * 60 / M_PI);
-          Console.print("/");
-          Console.print(-ypr[1] * 60 / M_PI);
-          Console.print("/");
-          Console.println(ypr[2] * 60 / M_PI);
-          }
-        }*/
-    }
-  public:
-    void handle_hardware()
-    {
-      //update_mpu_data();
-    }
-
-
-    void init_mpu()
-    {
-      /*mpu.initialize();
-        uint8_t dmp_s = mpu.dmpInitialize();
-
-        mpu.setXGyroOffset(220);
-        mpu.setYGyroOffset(76);
-        mpu.setZGyroOffset(-85);
-        mpu.setZAccelOffset(1788);
-
-        if (dmp_s == 0) {
-        mpu.CalibrateAccel(6);
-        mpu.CalibrateGyro(6);
-        mpu.setDMPEnabled(true);
-
-        packetSize = mpu.dmpGetFIFOPacketSize();
-        } else {
-        if (DEBUG == 1)
-          Console.println(":ERROR[" + String(dmp_s) + "]");
-        while (1); // ::pause_sketch::
-        }*/
-    }
+    // Internal functions
+    void set_joint(int leg, int joint, float degrees);
+    void init_mpu();
+    void update_mpu_data();
 };
-#endif
+
+#endif // __HARDWARE__

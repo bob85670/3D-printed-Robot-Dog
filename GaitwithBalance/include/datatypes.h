@@ -1,47 +1,61 @@
 #ifndef __DATA_TYPES__
 #define __DATA_TYPES__
 
-#define mm 0.1 /// millimeter
+/**
+ * Unit conversion constant
+ * Used to convert millimeters to internal units
+ */
+#define mm 0.1
 
-class datatypes
-{
-public:
-  /* ::: STEP, DATA TYPE ::: */
-  struct Step
-  {
-    float base;
-    float angle;
-  };
+namespace datatypes {
 
-  /* ::: VECTOR, DATA TYPE ::: */
-  struct Vector
-  {
-    double x;
-    double y;
-    double z;
-  };
-
-  /* ::: 2D VECTOR, DATA TYPE ::: */
-  struct Vector2D
-  {
-    float x;
-    float y;
-  };
-
-  /* ::: ROTATOR, DATA TYPE ::: */
-  struct Rotator
-  {
-    float yaw;
-    float pitch;
-    float roll;
-  };
-
-  /* ::: TRANFORM, DATA TYPE ::: */
-  struct Transform
-  {
-    Vector pos;
-    Rotator rot;
-    Vector scl;
-  };
+/**
+ * @brief Represents a single step movement
+ */
+struct Step {
+    float base;   ///< Base position
+    float angle;  ///< Step angle
 };
-#endif
+
+/**
+ * @brief 3D vector with double precision
+ * Used for precise position calculations
+ */
+struct Vector {
+    double x;  ///< X coordinate
+    double y;  ///< Y coordinate
+    double z;  ///< Z coordinate
+};
+
+/**
+ * @brief 2D vector with float precision
+ * Used for planar movements and directions
+ */
+struct Vector2D {
+    float x;  ///< X coordinate
+    float y;  ///< Y coordinate
+};
+
+/**
+ * @brief Represents orientation in 3D space
+ * Uses Euler angles in degrees
+ */
+struct Rotator {
+    float yaw;    ///< Rotation around Z axis
+    float pitch;  ///< Rotation around Y axis
+    float roll;   ///< Rotation around X axis
+};
+
+/**
+ * @brief Complete transform in 3D space
+ * Combines position, rotation, and scale
+ */
+struct Transform {
+    Vector pos;    ///< Position in 3D space
+    Rotator rot;   ///< Orientation
+    Vector scl;    ///< Scale factors
+};
+
+} // namespace datatypes
+
+#endif // __DATA_TYPES__

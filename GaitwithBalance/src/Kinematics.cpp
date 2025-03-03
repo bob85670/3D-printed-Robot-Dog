@@ -2,167 +2,202 @@
 #include "Kinematics.hpp"
 #include "Config.hpp"
 
-void Kinematics::handle_kinematics(int state, datatypes::Vector2D _dir, float _turn, float _height, float period)
-{
-  for (int l = 0; l < 4; l++)
-  {
-    float base = c_base(90) + base_offset[l] + _height; //> stores the base of each leg
+Kinematics::Kinematics(Hardware& h) :
+    base_offset{0, -1, 0, -2},
+    stored_0x(0.f),
+    hardware(h) {
+}
 
-    datatypes::Vector2D dir = {
-      precision + _dir.x + (_turn)*l_inv[l][1],
-      precision + _dir.y + (_turn)*l_inv[l][0]
-    };
-    count_c(l, dir, period); //> calls the clock function
+void Kinematics::handle_kinematics(int state, datatypes::Vector2D direction, float turn, float height, float period) {
+    for (int leg = 0; leg < 4; leg++) {
+        // Calculate base position with height adjustment
+        float base = c_base(90) + base_offset[leg] + height;
 
-    datatypes::Vector2D rDir = c_direction_ratio(dir);
-    datatypes::Vector vector = {0, 0, 0}; //> default leg coordinates
+        // Calculate movement direction with turn
+        datatypes::Vector2D dir = {
+            PRECISION + direction.x + turn * l_inv[leg][1],
+            PRECISION + direction.y + turn * l_inv[leg][0]
+        };
 
-    //: these functions run for each leg and return a 3 dimensional vector that stores the desired leg position in cartesian coordinates
-    if (state == 1 && (abs(dir.x) > precision || abs(dir.y) > precision))
-      vector = trot_gait_func({rDir.x * c[l], l_inv[l][1] * rDir.y * c[l]},
-                              dir, boolean(l % 2) ^ boolean(c_inv[l] % 2));
-    else if (state == 2)
-      vector = yaw_axis(l, _turn);
-    else if (state == 3)
-      vector = pitch_roll_axis(l, base, {0, _dir.x, _dir.y});
-    else if (state == 4)
-    {
-      vector = yaw_axis(l, stored_0x);
-      if (abs(stored_0x + _turn / 4.f) < 32.f)
-        stored_0x = inter(stored_0x, stored_0x + _turn / 4.f, 0.5f);
+        // Update leg timing
+        count_c(leg, dir, period);
+
+        // Calculate direction ratios
+        datatypes::Vector2D ratio_dir = c_direction_ratio(dir);
+        datatypes::Vector position = {0, 0, 0};
+
+        // Calculate leg positions based on state
+        switch (state) {
+            case 1: // Trot gait
+                if (abs(dir.x) > PRECISION || abs(dir.y) > PRECISION) {
+                    position = trot_gait_func(
+                        {ratio_dir.x * c[leg], l_inv[leg][1] * ratio_dir.y * c[leg]},
+                        dir,
+                        boolean(leg % 2) ^ boolean(c_inv[leg] % 2)
+                    );
+                }
+                break;
+
+            case 2: // Yaw control
+                position = yaw_axis(leg, turn);
+                break;
+
+            case 3: // Pitch-roll control
+                position = pitch_roll_axis(leg, base, {0, direction.x, direction.y});
+                break;
+
+            case 4: // Object detection mode
+                position = yaw_axis(leg, stored_0x);
+                if (abs(stored_0x + turn / 4.0f) < 32.0f) {
+                    stored_0x = inter(stored_0x, stored_0x + turn / 4.0f, 0.5f);
+                }
+                break;
+        }
+
+        // Convert position to joint angles and apply
+        datatypes::Rotator joint_angles = k_model(
+            vrt_offset, hrz_offset, base,
+            0, 0, position
+        );
+        hardware.set_leg(leg, joint_angles);
+    }
+}
+
+void Kinematics::count_c(int leg_index, datatypes::Vector2D dir, float period) {
+    // Calculate step width based on direction
+    float width = step_extent.x * mm / (2 / max(abs(dir.x), abs(dir.y)));
+    
+    // Calculate current position in cycle
+    float position = (width * 2) * (c_iter[leg_index] / round(FREQUENCY / period)) - width;
+
+    c[leg_index] = position;
+    c_iter[leg_index] += 1.0f;
+
+    // Reset cycle if complete
+    if (c_iter[leg_index] > round(FREQUENCY / period)) {
+        c[leg_index] = -width;
+        c_iter[leg_index] = 1.0f;
+        c_inv[leg_index] = !c_inv[leg_index];
+    }
+}
+
+datatypes::Vector Kinematics::trot_gait_func(datatypes::Vector2D c0, datatypes::Vector2D dir, bool invert) {
+    // Calculate step dimensions
+    float width = step_extent.x * mm / 2 * dir.x;
+    float length = step_extent.y * mm * 4 * dir.y;
+    float height = step_extent.z * mm;
+
+    // Invert position if needed
+    if (!invert) {
+        c0 = {-c0.x, -c0.y};
     }
 
-    //: this datatype stores three values which correspond to the three joint angles of each leg,
-    /// the 3 dimensional vector is converted through the k_model function into these three angles.
-    datatypes::Rotator cRot = k_model(vrt_offset, hrz_offset, base,
-                                      0, 0, vector);
-    hardware.set_leg(l, cRot); //> this function sets the three servos of each leg to the calculated value
-  }
+    // Calculate step height using elliptical path
+    float step_height = sqrt(abs((1 - sq(c0.x / width) - sq(c0.y / length)) * sq(height)));
+    
+    return {
+        c0.x / mm,
+        c0.y / mm,
+        step_height / mm * int(invert)
+    };
 }
 
-void Kinematics::count_c(int inst, datatypes::Vector2D dir, float period)
-{
-  float w0 = step_extent.x * mm / (2 / max(abs(dir.x), abs(dir.y)));
-  float a0 = (w0 * 2) * (c_iter[inst] / round(frequency / period)) - w0;
-
-  c[inst] = a0;
-  c_iter[inst] += 1.f;
-
-  if (c_iter[inst] > round(frequency / period))
-  {
-    c[inst] = -w0;
-    c_iter[inst] = 1.f;
-
-    c_inv[inst] = !c_inv[inst];
-  }
+float Kinematics::c_base(float angle) {
+    return sin(radians(angle / 2)) * BONE_LENGTH * 2;
 }
 
-/*
-  ::: [KINEMATICS] FUNCTIONS :::
-*/
+datatypes::Vector Kinematics::pitch_roll_axis(int leg, float base, datatypes::Rotator rotation) {
+    // Calculate initial positions
+    float width = body_transform.scl.x / 2 * l_inv[leg][0] + p_joint_origin[leg].x - vrt_offset;
+    float length = body_transform.scl.z / 2 + hrz_offset;
 
-/*
-     ::: GAIT FUNCTIONS :::
-*/
+    // Convert angles to radians
+    float pitch_rad = radians(rotation.pitch);
+    float roll_rad = radians(rotation.roll) * l_inv[leg][1];
 
-//: trot function
-datatypes::Vector Kinematics::trot_gait_func(datatypes::Vector2D c0, datatypes::Vector2D dir, bool inv)
-{
-  float w0 = step_extent.x * mm / 2 * dir.x;
-  float l0 = step_extent.y * mm * 4 * dir.y;
-  float h0 = step_extent.z * mm;
+    // Calculate pitch components
+    float pitch_sin = sin(pitch_rad) * width;
+    float pitch_offset = (1 - cos(pitch_rad)) * -width;
+    float pitch_magnitude = sqrt(sq(base + pitch_sin) + sq(pitch_offset));
+    pitch_rad += asin(pitch_offset / pitch_magnitude);
 
-  if (inv == false)
-    c0 = { -c0.x, -c0.y};
+    // Calculate intermediate values
+    float pitch_cos = cos(pitch_rad) * pitch_magnitude;
+    float pitch_sin_final = sin(pitch_rad) * pitch_magnitude;
 
-  float h1 = sqrt(abs((1 - sq(c0.x / w0) - sq(c0.y / l0)) * sq(h0)));
-  return {c0.x / mm, c0.y / mm, h1 / mm * int(inv)};
+    // Calculate roll components
+    float roll_sin = sin(roll_rad) * length;
+    float roll_offset = (1 - cos(roll_rad)) * length;
+    float roll_magnitude = sqrt(sq(pitch_cos - roll_sin) + sq(roll_offset));
+    roll_rad += asin(roll_offset / roll_magnitude);
+
+    // Calculate final positions
+    float roll_cos = cos(roll_rad) * roll_magnitude;
+    float roll_sin_final = sin(roll_rad) * roll_magnitude;
+
+    return {pitch_sin_final, roll_sin_final, base - roll_cos};
 }
 
-/*
-  ::: TRIGONOMETRIC FUNCTIONS :::
-*/
+datatypes::Vector Kinematics::yaw_axis(int leg, float yaw) {
+    // Calculate initial positions
+    float x = body_transform.scl.x / 2 - abs(p_joint_origin[leg].x) - vrt_offset * l_inv[leg][0];
+    float y = body_transform.scl.z / 2 + hrz_offset;
+    
+    // Calculate rotation
+    float radius = sqrt(sq(x) + sq(y));
+    float angle = asin(y / radius) - radians(yaw) * l_inv[leg][0] * l_inv[leg][1];
 
-//: base calculation function
-float Kinematics::c_base(float angle1)
-{
-  return sin(radians(angle1 / 2)) * bone_length * 2;
+    // Calculate new positions
+    return {
+        (x - cos(angle) * radius) * l_inv[leg][0],
+        sin(angle) * radius - y,
+        0
+    };
 }
 
-//: pitch-roll axis function
-datatypes::Vector Kinematics::pitch_roll_axis(int leg, float base, datatypes::Rotator sRot)
-{
-  float w0 = body_transform.scl.x / 2 * l_inv[leg][0] + p_joint_origin[leg].x - vrt_offset;
-  float l0 = body_transform.scl.z / 2 + hrz_offset;
-
-  float C0 = radians(sRot.pitch);
-  float C1 = radians(sRot.roll) * l_inv[leg][1];
-
-  float a0 = sin(C0) * w0;
-  float a1 = sin(C1) * l0;
-
-  float d0 = (1 - cos(C0)) * -w0;
-  float d1 = (1 - cos(C1)) * l0;
-
-  float var0 = sqrt(sq(base + a0) + sq(d0));
-  C0 += asin(d0 / var0);
-
-  float b0 = cos(C0) * var0;
-  float c0 = sin(C0) * var0;
-
-  float var1 = sqrt(sq(b0 - a1) + sq(d1));
-  C1 += asin(d1 / var1);
-
-  float b1 = cos(C1) * var1;
-  float c1 = sin(C1) * var1;
-
-  return {c0, c1, base - b1};
+datatypes::Vector2D Kinematics::c_direction_ratio(datatypes::Vector2D dir) {
+    float max_component = max(abs(dir.x), abs(dir.y));
+    return {
+        dir.x / max_component,
+        dir.y / max_component
+    };
 }
 
-//: yaw axis function
-datatypes::Vector Kinematics::yaw_axis(int leg, float yaw)
-{
-  float x = body_transform.scl.x / 2 - abs(p_joint_origin[leg].x) - vrt_offset * l_inv[leg][0];
-  float y = body_transform.scl.z / 2 + hrz_offset;
-  float radius = sqrt(sq(x) + sq(y));
-  float angle = asin(y / radius) - radians(yaw) * l_inv[leg][0] * l_inv[leg][1];
-
-  float rX = (x - cos(angle) * radius) * l_inv[leg][0];
-  float rY = sin(angle) * radius - y;
-  return {rX, rY, 0};
-}
-
-//: direction ratio calculation function
-datatypes::Vector2D Kinematics::c_direction_ratio(datatypes::Vector2D dir)
-{
-  float dirX = dir.x / max(abs(dir.x), abs(dir.y));
-  float dirY = dir.y / max(abs(dir.x), abs(dir.y));
-  return {dirX, dirY};
-}
-
-//: inverse kinematic algorithm
 datatypes::Rotator Kinematics::k_model(float x0, float y0, float z0,
-                                       float pitch_offset, float roll_offset, datatypes::Vector vec)
-{
-  float x = x0 + vec.x,
-        y = y0 + vec.y,
-        z = z0 - vec.z;
+                                     float pitch_offset, float roll_offset,
+                                     datatypes::Vector vec) {
+    // Calculate final positions
+    float x = x0 + vec.x;
+    float y = y0 + vec.y;
+    float z = z0 - vec.z;
 
-  float b0 = sqrt(sq(x) + sq(y));
-  float h0 = sqrt(sq(b0) + sq(z));
+    // Calculate intermediate values
+    float base_xy = sqrt(sq(x) + sq(y));
+    float height = sqrt(sq(base_xy) + sq(z));
 
-  float a0 = degrees(atan(x / z));
-  float a1 = degrees(atan(y / z));
+    // Calculate angles
+    float pitch = degrees(atan(x / z));
+    float roll = degrees(atan(y / z));
 
-  return c_triangle(a0 + pitch_offset, a1 + roll_offset, h0);
+    return c_triangle(pitch + pitch_offset, roll + roll_offset, height);
 }
 
-//: final triangle calculation function
-datatypes::Rotator Kinematics::c_triangle(float a0, float a1, float b0)
-{
-  float angle1 = a1;
-  float angle3 = degrees(asin((b0 / 2.0) / bone_length)) * 2;
-  float angle2 = angle3 / 2 + a0;
+datatypes::Rotator Kinematics::c_triangle(float angle0, float angle1, float base) {
+    float angle3 = degrees(asin((base / 2.0) / BONE_LENGTH)) * 2;
+    float angle2 = angle3 / 2 + angle0;
 
-  return {angle1, angle2, angle3};
+    return {angle1, angle2, angle3};
+}
+
+float Kinematics::inter(float current, float target, float step) {
+    if (current < target - step) {
+        return ((current * 1000.0f) + (step * 1000.0f)) / 1000.0f;
+    } else if (current > target + step) {
+        return ((current * 1000.0f) - (step * 1000.0f)) / 1000.0f;
+    }
+    return target;
+}
+
+int Kinematics::sign(float num) {
+    return int(num >= 0) - int(num < 0);
 }
